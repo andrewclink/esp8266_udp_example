@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <osapi.h>
 #include <user_interface.h>
-#include <espconn.h>
+#include <lwip/udp.h>
 
 #include "def.h"
 #include "network.h"
@@ -69,7 +69,7 @@ static void network_monitor(void)
   uint8_t station_state = wifi_station_get_connect_status();  // Get Layer 2 info
   wifi_get_ip_info(STATION_IF, &ipconfig);                    // Get Layer 3 info
   
-  os_printf("network_monitor: connection: %d; station: %d\n", connection_state, station_state);
+  // os_printf("network_monitor: connection: %d; station: %d\n", connection_state, station_state);
   
   // Check network state
   switch(connection_state)
@@ -97,13 +97,22 @@ static void network_monitor(void)
       
       switch(station_state)
       {
+        case STATION_WRONG_PASSWORD: tries = 45; /* fall through */
         default:
-        case STATION_WRONG_PASSWORD:
-        case STATION_NO_AP_FOUND:
-        case STATION_CONNECT_FAIL:
+        case STATION_NO_AP_FOUND:  // Maybe still coming back online (chip will continue to try)
+        case STATION_CONNECT_FAIL: // Maybe still coming back online (chip retry unknown)
         {
-          os_printf("Could not connect: %d; Giving Up\n", station_state);
-          return;
+          if (tries > 30)
+          {
+            os_printf("Could not connect: %d; Giving Up\n", station_state);
+            // Here would be a good place to switch modes to softap
+            return;
+          }
+          
+          os_printf("Connect attempt %d failed with %d\n", tries, station_state);
+          tries++;
+          
+          break;
         }
         
         case STATION_CONNECTING:
@@ -143,6 +152,7 @@ static void network_monitor(void)
       if (STATION_GOT_IP != station_state)
       {
         os_printf("station_state = %d (not GOT_IP); reconnecting\n", station_state);
+        wifi_station_disconnect();
         connection_state = connstate_disconnected;
       }
       
@@ -156,30 +166,68 @@ static void network_monitor(void)
   
 }
 
-static void ICACHE_FLASH_ATTR udpNetworkRecvCb(void *arg, char *data, unsigned short len) 
+//static void ICACHE_FLASH_ATTR network_recvCallback(void *arg, char *data, unsigned short len) 
+static void ICACHE_FLASH_ATTR network_recvCallback(void *arg, struct udp_pcb *pcb, struct pbuf *p, struct ip_addr *addr, u16_t port)
 {
+  // os_printf("Recv %d bytes from %d.%d.%d.%d\n", len, addr[3], addr[2], addr[1], addr[0]);
+  udp_sendto(pcb, p, addr, port);
+  /* free the pbuf */
+  pbuf_free(p);
+}
+
+void ICACHE_FLASH_ATTR network_udp_sendto(struct udp_pcb * pcb, uint8 *buffer, uint16 length, ip_addr_t addr, uint16_t port)
+{
+  // Create pbuf
+  struct pbuf *pbuf = pbuf_alloc(PBUF_TRANSPORT, length, PBUF_RAM);
+  if (NULL == pbuf)
+  {
+    os_printf("Could not allocate pbuf\n");
+    return;
+  }
   
+  #if 0
+  // Copy data to be sent into all packets (this support packet fragmenting)
+  struct pbuf * tmp = pbuf;
+  while(tmp != NULL)
+  {
+    
+    tmp = tmp->next;
+  }
+  #else
+  os_memcpy(pbuf->payload, buffer, length);
+  #endif
+  
+  // pcb->remote_port = port;
+  // os_memcpy(&pcb->remote_ip, &addr, sizeof(addr));
+  
+  udp_sendto(pcb, pbuf, &addr, port);
+  
+  // free pbuf?
+  pbuf_free(pbuf);
 }
 
 static void network_task(os_event_t * event)
 {
-  static struct espconn connection;
-  static esp_udp connection_udp;
+  // static struct espconn connection;
+  // static esp_udp connection_udp;
+  static struct udp_pcb *ptel_pcb = NULL;
+  
 
   if (event->sig == sig_wifiConnected)
   {
     // Initialize sockets
     os_printf("Initializing sockets\n");
+    #if 0
+    //ESPCONN
     connection.type=ESPCONN_UDP;                                    // We want to make a UDP connection
     connection.state=ESPCONN_NONE;                                  // Set default state to none
     connection.proto.udp = &connection_udp;
     connection.proto.udp->local_port=2023;                          // Set local port to 2222
     connection.proto.udp->remote_port=2023;                         // Set remote port
-    connection.proto.udp->remote_ip[0]=225;                         // The other ESP8266 IP
-    connection.proto.udp->remote_ip[1]=0;                           //   The other ESP8266 IP
-    connection.proto.udp->remote_ip[2]=0;                           //   The other ESP8266 IP
-    connection.proto.udp->remote_ip[3]=77;                          //   The other ESP8266 IP
-
+    connection.proto.udp->remote_ip[0]=225;                         // Set Remote IP
+    connection.proto.udp->remote_ip[1]=0;                           //
+    connection.proto.udp->remote_ip[2]=0;                           //
+    connection.proto.udp->remote_ip[3]=77;                          //
     if(espconn_create(&connection) < 0) 
     {
       os_printf("Error creating connection\n");
@@ -187,6 +235,17 @@ static void network_task(os_event_t * event)
       // This needs to be detected and mitigated.
       return;
     }
+    #else
+    
+    ptel_pcb = udp_new();
+
+    udp_bind(ptel_pcb, IP_ADDR_ANY, 2023);
+    udp_recv(ptel_pcb, network_recvCallback, NULL);
+    
+    #endif
+    
+    
+
 
     // espconn_regist_recvcb(&connection, udpNetworkRecvCb);
     os_printf("UDP connection set\n\r");
@@ -196,10 +255,31 @@ static void network_task(os_event_t * event)
   if (connstate_socketsOK)
   {
     static uint8_t value = 128;
-    uint8_t buffer[] = {0x03, 0x00, value++};
-    
+    uint8_t buffer[] = {0x03, value & 0x1, value++};
+
+    #if 0
+    connection.proto.udp->local_port=2023;                          // Set local port to 2222
+    connection.proto.udp->remote_port=2023;                         // Set remote port
+    connection.proto.udp->remote_ip[0]=225;                         // Set Remote IP
+    connection.proto.udp->remote_ip[1]=0;                           //
+    connection.proto.udp->remote_ip[2]=0;                           //
+    connection.proto.udp->remote_ip[3]=77;                          //
+        
     espconn_sent(&connection, buffer, 3);
-    os_delay_us(1000 * 20); 
+    #else
+
+    if (NULL != ptel_pcb)
+    {
+      ip_addr_t dest;
+      IP4_ADDR(&dest, 225, 0, 0, 77);
+      network_udp_sendto(ptel_pcb, buffer, sizeof(buffer), dest, 2023);
+      os_printf("Sending\n");
+    }
+    
+    #endif
+    
+    
+    os_delay_us(1000 * 45); 
     system_os_post(1, 0xff, 0); // Pump this task
   }
   

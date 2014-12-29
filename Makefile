@@ -39,7 +39,10 @@ LIBS		= c gcc hal phy net80211 lwip wpa main pp
 
 CFLAGS		= -Os -g -O2 \
 -Wpointer-arith -Wundef -Werror -Wl,-EL \
--fno-inline-functions -nostdlib -mlongcalls -mtext-section-literals  -D__ets__ -DICACHE_FLASH
+-fno-inline-functions -nostdlib -mlongcalls -mtext-section-literals \
+-D__ets__ \
+-DICACHE_FLASH \
+-DLWIP_OPEN_SRC
 
 # linker flags used to generate the main object file
 LDFLAGS		= -nostdlib -Wl,--no-check-sections -u call_user_start -Wl,-static -L$(SDK_BASE)/lib/gcc/xtensa-lx106-elf/4.8.2/
